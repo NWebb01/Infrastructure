@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-  One-shot Hyper-V capacity planning collector + RVTools-style Excel report.
+  One-shot Hyper-V capacity planning collector + RVTools-style Excel report (PowerShell 5.1 compatible).
 
 .DESCRIPTION
   - Remotely inventories Hyper-V hosts (VMs, hosts, cluster, networking, storage, optional perf).
@@ -23,7 +23,7 @@
   Collect average perf counter samples during run.
 
 .PARAMETER PerfSampleSeconds
-  Duration for perf sampling (default 60s, sampled at 5s interval).
+  Duration for perf sampling (default 60s, 5s interval).
 
 .PARAMETER OutputRoot
   Root folder for results (folder 'HyperV_Sizing_yyyyMMdd_HHmmss' is created inside).
@@ -32,10 +32,10 @@
   Optional custom output path for Excel workbook (.xlsx). Defaults under OutputRoot.
 
 .PARAMETER Recurse
-  (For the consolidation step) Not typically needed since we write to a single folder, but supported.
+  (For consolidation) Supported but not necessary—script writes to one folder.
 
 .PARAMETER ForceCOM
-  Force Excel COM automation even if ImportExcel is present.
+  Force Excel COM (ignore ImportExcel if present).
 
 .PARAMETER AutoOpen
   Open the Excel file after creation.
@@ -45,11 +45,6 @@
 
 .EXAMPLE
   .\Get-HyperVInventoryAndReport.ps1 -HostListPath .\hosts.txt -Credential (Get-Credential)
-
-.NOTES
-  - Run from an elevated PowerShell session with network access to target hosts.
-  - Remote hosts must have Hyper-V role (for Hyper-V cmdlets) and, if clustered, FailoverClusters module.
-  - ImportExcel path (if you want nicer output): https://www.powershellgallery.com/packages/ImportExcel
 #>
 
 [CmdletBinding()]
@@ -135,7 +130,6 @@ foreach ($h in $hosts) {
       $os  = Get-CimInstance -ClassName Win32_OperatingSystem
       $cs  = Get-CimInstance -ClassName Win32_ComputerSystem
       $procs = Get-CimInstance -ClassName Win32_Processor
-      $memMods = Get-CimInstance -ClassName Win32_PhysicalMemory
       $bios = Get-CimInstance -ClassName Win32_BIOS
 
       # Hyper-V host config
@@ -166,7 +160,6 @@ foreach ($h in $hosts) {
         $vSwitch = Get-VMSwitch -ErrorAction SilentlyContinue | ForEach-Object {
           $uplinks = $null
           try {
-            # SET switching: adapter descs tied to the switch team (if cmdlet exists)
             if (Get-Command Get-VMSwitchTeam -ErrorAction SilentlyContinue) {
               $uplinks = (Get-VMSwitchTeam -SwitchName $_.Name -ErrorAction SilentlyContinue |
                          Select-Object -ExpandProperty NetAdapterInterfaceDescription) -join ';'
@@ -310,7 +303,7 @@ foreach ($h in $hosts) {
             CPUReservePct       = $cpu.Reserve
             CPURelativeWeight   = $cpu.RelativeWeight
             ExposeVirtualNUMA   = $cpu.ExposeVirtualizationExtensions
-            MemoryAssignedMB    = [int]($vm.MemoryAssigned / 1MB)
+            MemoryAssignedMB    = $vm.MemoryAssigned / 1MB
             MemoryStartupMB     = $mem.Startup
             DynamicMemoryEnabled= $mem.DynamicMemoryEnabled
             MinMemoryMB         = $mem.Minimum
@@ -327,7 +320,8 @@ foreach ($h in $hosts) {
       $perf = @()
       if ($using:CollectPerf) {
         $sampleInterval = 5
-        $samples = [Math]::Max([Math]::Round($using:PerfSampleSeconds / $sampleInterval, 0), 1)
+        $samples = [Math]::Round($using:PerfSampleSeconds / $sampleInterval, 0)
+        if ($samples -lt 1) { $samples = 1 }
 
         $counters = @(
           '\Hyper-V Hypervisor Logical Processor(_Total)\% Total Run Time',
@@ -615,7 +609,9 @@ $tables['Summary'] = if ($summaryRows) { $summaryRows } else { [pscustomobject]@
 
 # Try ImportExcel (unless forced COM)
 $hasImportExcel = $false
-if (-not $ForceCOM) { $hasImportExcel = [bool](Get-Module -ListAvailable -Name ImportExcel) }
+if (-not $ForceCOM) {
+  $hasImportExcel = Get-Module -ListAvailable -Name ImportExcel
+}
 
 if ($hasImportExcel) {
   Write-Host "Using ImportExcel module for output..." -ForegroundColor Green
@@ -671,13 +667,14 @@ else {
       $data = $tables[$name]
       if (-not $data) { continue }
       $ws = $wb.Worksheets.Add()
-      $ws.Name = ($name.Length -gt 31) ? $name.Substring(0,31) : $name
+      if ($name.Length -gt 31) { $ws.Name = $name.Substring(0,31) } else { $ws.Name = $name }
       Write-ComSheet -Worksheet $ws -Data $data
     }
 
-    # Save as xlsx (51 = xlOpenXMLWorkbook)
+    # Ensure output directory exists and save as xlsx (51 = xlOpenXMLWorkbook)
     $null = New-Item -ItemType Directory -Force -Path (Split-Path -Path $ExcelPath -Parent) -ErrorAction SilentlyContinue
-    $wb.SaveAs((Resolve-Path (New-Item -ItemType File -Path $ExcelPath -Force)).Path, 51)
+    if (!(Test-Path $ExcelPath)) { New-Item -ItemType File -Path $ExcelPath -Force | Out-Null }
+    $wb.SaveAs((Resolve-Path $ExcelPath).Path, 51)
     $wb.Close($true)
     $excel.Quit()
   }
